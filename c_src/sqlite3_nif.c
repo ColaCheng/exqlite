@@ -270,11 +270,6 @@ exqlite_close(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
         }
     }
 
-    // close connection in critical section to avoid race-condition
-    // cases. Cases such as query timeout and connection pooling
-    // attempting to close the connection
-    enif_mutex_lock(conn->mutex);
-
     // note: _v2 may not fully close the connection, hence why we check if
     // any transaction is open above, to make sure other connections aren't blocked.
     // v1 is guaranteed to close or error, but will return error if any
@@ -282,10 +277,13 @@ exqlite_close(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
     // to later run to clean those up
     rc = sqlite3_close_v2(conn->db);
     if (rc != SQLITE_OK) {
-        enif_mutex_unlock(conn->mutex);
         return make_sqlite3_error_tuple(env, rc, conn->db);
     }
 
+    // close connection in critical section to avoid race-condition
+    // cases. Cases such as query timeout and connection pooling
+    // attempting to close the connection
+    enif_mutex_lock(conn->mutex);
     conn->db = NULL;
     enif_mutex_unlock(conn->mutex);
 
