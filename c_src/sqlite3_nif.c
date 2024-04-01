@@ -262,13 +262,13 @@ exqlite_close(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
         return make_atom(env, "ok");
     }
 
-    int autocommit = sqlite3_get_autocommit(conn->db);
-    if (autocommit == 0) {
-        rc = sqlite3_exec(conn->db, "ROLLBACK;", NULL, NULL, NULL);
-        if (rc != SQLITE_OK) {
-            return make_sqlite3_error_tuple(env, rc, conn->db);
-        }
-    }
+    // int autocommit = sqlite3_get_autocommit(conn->db);
+    // if (autocommit == 0) {
+    //     rc = sqlite3_exec(conn->db, "ROLLBACK;", NULL, NULL, NULL);
+    //     if (rc != SQLITE_OK) {
+    //         return make_sqlite3_error_tuple(env, rc, conn->db);
+    //     }
+    // }
 
     // note: _v2 may not fully close the connection, hence why we check if
     // any transaction is open above, to make sure other connections aren't blocked.
