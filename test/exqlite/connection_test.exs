@@ -174,7 +174,7 @@ defmodule Exqlite.ConnectionTest do
 
   describe ".disconnect/2" do
     test "disconnects a database that was never connected" do
-      conn = %Connection{db: nil, path: nil}
+      conn = %Connection{db: nil, path: nil, statements: nil}
 
       assert :ok == Connection.disconnect(nil, conn)
     end
@@ -365,17 +365,27 @@ defmodule Exqlite.ConnectionTest do
     test "releases the underlying prepared statement" do
       {:ok, conn} = Connection.connect(database: :memory)
 
-      {:ok, query, _result, conn} =
+      {:ok, query, _result, %{statements: statements} = conn} =
         %Query{statement: "create table users (id integer primary key, name text)"}
         |> Connection.handle_execute([], [], conn)
 
-      assert {:ok, nil, conn} == Connection.handle_close(query, [], conn)
+      assert :ets.info(statements, :size) == 1
 
-      {:ok, query, conn} =
+      assert {:ok, nil, %{statements: statements} = conn} =
+               Connection.handle_close(query, [], conn)
+
+      assert :ets.info(statements, :size) == 0
+
+      {:ok, query, %{statements: statements} = conn} =
         %Query{statement: "select * from users where id < ?"}
         |> Connection.handle_prepare([], conn)
 
-      assert {:ok, nil, conn} == Connection.handle_close(query, [], conn)
+      assert :ets.info(statements, :size) == 1
+
+      assert {:ok, nil, %{statements: statements} = _conn} =
+               Connection.handle_close(query, [], conn)
+
+      assert :ets.info(statements, :size) == 0
     end
   end
 end

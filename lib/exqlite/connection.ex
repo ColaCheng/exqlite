@@ -37,7 +37,8 @@ defmodule Exqlite.Connection do
     :transaction_status,
     :status,
     :chunk_size,
-    :before_disconnect
+    :before_disconnect,
+    :statements
   ]
 
   @type t() :: %__MODULE__{
@@ -47,7 +48,8 @@ defmodule Exqlite.Connection do
           transaction_status: :idle | :transaction,
           status: :idle | :busy,
           chunk_size: integer(),
-          before_disconnect: (t -> any) | {module, atom, [any]} | nil
+          before_disconnect: (t -> any) | {module, atom, [any]} | nil,
+          statements: reference()
         }
 
   @type journal_mode() :: :delete | :truncate | :persist | :memory | :wal | :off
@@ -159,8 +161,8 @@ defmodule Exqlite.Connection do
             "./priv/sqlite/\#{arch_dir}/vss0"
           ]
       ```
-    * `:before_disconnect` - A function to run before disconnect, either a 
-      2-arity fun or `{module, function, args}` with the close reason and 
+    * `:before_disconnect` - A function to run before disconnect, either a
+      2-arity fun or `{module, function, args}` with the close reason and
       `t:Exqlite.Connection.t/0` prepended to `args` or `nil` (default: `nil`)
 
   For more information about the options above, see [sqlite documentation][1]
@@ -226,14 +228,21 @@ defmodule Exqlite.Connection do
 
   @impl true
   def handle_prepare(%Query{} = query, options, state) do
-    with {:ok, query} <- prepare(query, options, state) do
+    with {:ok, %{ref: ref} = query} <- prepare(query, options, state) do
+      add_statement(state, ref)
       {:ok, query, state}
     end
   end
 
   @impl true
-  def handle_execute(%Query{} = query, params, options, state) do
-    with {:ok, query} <- prepare(query, options, state) do
+  def handle_execute(
+        %Query{} = query,
+        params,
+        options,
+        state
+      ) do
+    with {:ok, %{ref: ref} = query} <- prepare(query, options, state) do
+      add_statement(state, ref)
       execute(:execute, query, params, state)
     end
   end
@@ -326,8 +335,9 @@ defmodule Exqlite.Connection do
   This callback is called in the client process.
   """
   @impl true
-  def handle_close(query, _opts, state) do
-    Sqlite3.release(state.db, query.ref)
+  def handle_close(%Query{ref: ref} = _query, _opts, state) do
+    Sqlite3.release(state.db, ref)
+    remove_statement(state, ref)
     {:ok, nil, state}
   end
 
@@ -335,15 +345,22 @@ defmodule Exqlite.Connection do
   def handle_declare(%Query{} = query, params, opts, state) do
     # We emulate cursor functionality by just using a prepared statement and
     # step through it. Thus we just return the query ref as the cursor.
-    with {:ok, query} <- prepare_no_cache(query, opts, state),
+    with {:ok, %{ref: ref} = query} <- prepare_no_cache(query, opts, state),
          {:ok, query} <- bind_params(query, params, state) do
-      {:ok, query, query.ref, state}
+      add_statement(state, ref)
+      {:ok, query, ref, state}
     end
   end
 
   @impl true
-  def handle_deallocate(%Query{} = query, _cursor, _opts, state) do
-    Sqlite3.release(state.db, query.ref)
+  def handle_deallocate(
+        %Query{ref: ref} = _query,
+        _cursor,
+        _opts,
+        state
+      ) do
+    Sqlite3.release(state.db, ref)
+    remove_statement(state, ref)
     {:ok, nil, state}
   end
 
@@ -544,6 +561,15 @@ defmodule Exqlite.Connection do
          :ok <- set_soft_heap_limit(db, options),
          :ok <- set_hard_heap_limit(db, options),
          :ok <- load_extensions(db, options) do
+      opts = [
+        :set,
+        :public,
+        read_concurrency: true,
+        write_concurrency: true
+      ]
+
+      ref = :ets.new(:exqlite_connection_statements, opts)
+
       state = %__MODULE__{
         db: db,
         directory: directory,
@@ -551,7 +577,8 @@ defmodule Exqlite.Connection do
         transaction_status: :idle,
         status: :idle,
         chunk_size: Keyword.get(options, :chunk_size),
-        before_disconnect: Keyword.get(options, :before_disconnect, nil)
+        before_disconnect: Keyword.get(options, :before_disconnect, nil),
+        statements: ref
       }
 
       {:ok, state}
@@ -715,4 +742,12 @@ defmodule Exqlite.Connection do
   # before trying to open the DB file.
   defp mkdir_p(nil), do: :ok
   defp mkdir_p(directory), do: File.mkdir_p(directory)
+
+  defp add_statement(%{statements: statements} = _state, ref) do
+    :ets.insert(statements, {ref})
+  end
+
+  defp remove_statement(%{statements: statements} = _state, ref) do
+    :ets.delete(statements, ref)
+  end
 end
