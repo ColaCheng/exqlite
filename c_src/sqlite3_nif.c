@@ -277,6 +277,7 @@ exqlite_close(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
     // attempting to close the connection
     enif_mutex_lock(conn->mutex);
     printf("exqlite_close3\n");
+    sqlite3_interrupt(conn->db);
 
     // note: _v2 may not fully close the connection, hence why we check if
     // any transaction is open above, to make sure other connections aren't blocked.
