@@ -262,7 +262,6 @@ exqlite_close(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
         return make_atom(env, "ok");
     }
 
-    printf("exqlite_close1\n");
     int autocommit = sqlite3_get_autocommit(conn->db);
     if (autocommit == 0) {
         rc = sqlite3_exec(conn->db, "ROLLBACK;", NULL, NULL, NULL);
@@ -270,14 +269,11 @@ exqlite_close(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
             return make_sqlite3_error_tuple(env, rc, conn->db);
         }
     }
-    printf("exqlite_close2: %d\n", autocommit);
 
     // close connection in critical section to avoid race-condition
     // cases. Cases such as query timeout and connection pooling
     // attempting to close the connection
     enif_mutex_lock(conn->mutex);
-    printf("exqlite_close3\n");
-    sqlite3_interrupt(conn->db);
 
     // note: _v2 may not fully close the connection, hence why we check if
     // any transaction is open above, to make sure other connections aren't blocked.
@@ -289,11 +285,9 @@ exqlite_close(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
         enif_mutex_unlock(conn->mutex);
         return make_sqlite3_error_tuple(env, rc, conn->db);
     }
-    printf("exqlite_close4\n");
 
     conn->db = NULL;
     enif_mutex_unlock(conn->mutex);
-    printf("exqlite_close5\n");
 
     return make_atom(env, "ok");
 }
@@ -621,27 +615,22 @@ exqlite_multi_step(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
     ERL_NIF_TERM rows = enif_make_list_from_array(env, NULL, 0);
     for (int i = 0; i < chunk_size; i++) {
         ERL_NIF_TERM row;
-        printf("exqlite_multi_step: i=%d, chunk_size=%d in for\n", i, chunk_size);
 
         int rc = sqlite3_step(statement->statement);
         switch (rc) {
             case SQLITE_BUSY:
-                printf("exqlite_multi_step: SQLITE_BUSY\n");
                 sqlite3_reset(statement->statement);
                 return make_atom(env, "busy");
 
             case SQLITE_DONE:
-                printf("exqlite_multi_step: SQLITE_DONE\n");
                 return enif_make_tuple2(env, make_atom(env, "done"), rows);
 
             case SQLITE_ROW:
-                printf("exqlite_multi_step: SQLITE_ROW\n");
                 row  = make_row(env, statement->statement);
                 rows = enif_make_list_cell(env, row, rows);
                 break;
 
             default:
-                printf("exqlite_multi_step: default\n");
                 sqlite3_reset(statement->statement);
                 return make_sqlite3_error_tuple(env, rc, conn->db);
         }
@@ -1140,6 +1129,31 @@ exqlite_set_log_hook(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
     return make_atom(env, "ok");
 }
 
+static ERL_NIF_TERM
+exqlite_interrupt(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
+{
+    assert(env);
+
+    connection_t* conn     = NULL;
+
+    if (argc != 1) {
+        return enif_make_badarg(env);
+    }
+
+    if (!enif_get_resource(env, argv[0], connection_type, (void**)&conn)) {
+        return make_error_tuple(env, "invalid_connection");
+    }
+
+    // DB is already closed, nothing to do here
+    if (conn->db == NULL) {
+        return make_atom(env, "ok");
+    }
+
+    sqlite3_interrupt(conn->db);
+
+    return make_atom(env, "ok");
+}
+
 //
 // Most of our nif functions are going to be IO bounded
 //
@@ -1162,6 +1176,7 @@ static ErlNifFunc nif_funcs[] = {
   {"enable_load_extension", 2, exqlite_enable_load_extension, ERL_NIF_DIRTY_JOB_IO_BOUND},
   {"set_update_hook", 2, exqlite_set_update_hook, ERL_NIF_DIRTY_JOB_IO_BOUND},
   {"set_log_hook", 1, exqlite_set_log_hook, ERL_NIF_DIRTY_JOB_IO_BOUND},
+  {"interrupt", 1, exqlite_interrupt, ERL_NIF_DIRTY_JOB_IO_BOUND},
 };
 
 ERL_NIF_INIT(Elixir.Exqlite.Sqlite3NIF, nif_funcs, on_load, NULL, NULL, on_unload)
