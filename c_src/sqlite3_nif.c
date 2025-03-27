@@ -1352,6 +1352,7 @@ exqlite_interrupt(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
     assert(env);
 
     connection_t* conn = NULL;
+    sqlite3* db = NULL;
 
     if (argc != 1) {
         return enif_make_badarg(env);
@@ -1361,14 +1362,18 @@ exqlite_interrupt(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
         return make_error_tuple(env, am_invalid_connection);
     }
 
-    // DB is already closed, nothing to do here
+    // First check
     if (conn->db == NULL) {
         return am_ok;
     }
 
-    // connection_acquire_lock(conn);
-    sqlite3_interrupt(conn->db);
-    // connection_release_lock(conn);
+    // Get a local copy of the db pointer to avoid race conditions
+    db = conn->db;
+    if (db == NULL) {
+        return am_ok;
+    }
+
+    sqlite3_interrupt(db);
 
     return am_ok;
 }
