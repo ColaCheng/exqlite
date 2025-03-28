@@ -22,6 +22,7 @@ static ERL_NIF_TERM am_invalid_filename;
 static ERL_NIF_TERM am_invalid_flags;
 static ERL_NIF_TERM am_database_open_failed;
 static ERL_NIF_TERM am_failed_to_create_mutex;
+static ERL_NIF_TERM am_failed_to_create_interrupt_mutex;
 static ERL_NIF_TERM am_invalid_connection;
 static ERL_NIF_TERM am_sql_not_iolist;
 static ERL_NIF_TERM am_connection_closed;
@@ -52,6 +53,7 @@ typedef struct connection
 {
     sqlite3* db;
     ErlNifMutex* mutex;
+    ErlNifMutex* interrupt_mutex;
     ErlNifPid update_hook_pid;
 } connection_t;
 
@@ -273,6 +275,20 @@ connection_release_lock(connection_t* conn)
 }
 
 static inline void
+connection_acquire_interrupt_lock(connection_t* conn)
+{
+    assert(conn);
+    enif_mutex_lock(conn->interrupt_mutex);
+}
+
+static inline void
+connection_release_interrupt_lock(connection_t* conn)
+{
+    assert(conn);
+    enif_mutex_unlock(conn->interrupt_mutex);
+}
+
+static inline void
 statement_acquire_lock(statement_t* statement)
 {
     assert(statement);
@@ -300,6 +316,7 @@ exqlite_open(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
     connection_t* conn = NULL;
     sqlite3* db        = NULL;
     ErlNifMutex* mutex = NULL;
+    ErlNifMutex* interrupt_mutex = NULL;
     ERL_NIF_TERM result;
     ErlNifBinary bin;
 
@@ -328,17 +345,25 @@ exqlite_open(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
         return make_error_tuple(env, am_failed_to_create_mutex);
     }
 
+    interrupt_mutex = enif_mutex_create("exqlite:interrupt");
+    if (interrupt_mutex == NULL) {
+        sqlite3_close_v2(db);
+        enif_mutex_destroy(mutex);
+        return make_error_tuple(env, am_failed_to_create_interrupt_mutex);
+    }
+
     sqlite3_busy_timeout(db, 2000);
 
     conn = enif_alloc_resource(connection_type, sizeof(connection_t));
     if (!conn) {
         sqlite3_close_v2(db);
         enif_mutex_destroy(mutex);
+        enif_mutex_destroy(interrupt_mutex);
         return make_error_tuple(env, am_out_of_memory);
     }
-    conn->db    = db;
-    conn->mutex = mutex;
-
+    conn->db              = db;
+    conn->mutex           = mutex;
+    conn->interrupt_mutex = interrupt_mutex;
     result = enif_make_resource(env, conn);
     enif_release_resource(conn);
 
@@ -374,11 +399,14 @@ exqlite_close(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
     // attempting to close the connection
     connection_acquire_lock(conn);
 
+    connection_acquire_interrupt_lock(conn);
+
     int autocommit = sqlite3_get_autocommit(conn->db);
     if (autocommit == 0) {
         rc = sqlite3_exec(conn->db, "ROLLBACK;", NULL, NULL, NULL);
         if (rc != SQLITE_OK) {
             connection_release_lock(conn);
+            connection_release_interrupt_lock(conn);
             return make_sqlite3_error_tuple(env, rc, conn->db);
         }
     }
@@ -391,11 +419,13 @@ exqlite_close(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
     rc = sqlite3_close_v2(conn->db);
     if (rc != SQLITE_OK) {
         connection_release_lock(conn);
+        connection_release_interrupt_lock(conn);
         return make_sqlite3_error_tuple(env, rc, conn->db);
     }
 
     conn->db = NULL;
     connection_release_lock(conn);
+    connection_release_interrupt_lock(conn);
 
     return am_ok;
 }
@@ -1078,6 +1108,11 @@ connection_type_destructor(ErlNifEnv* env, void* arg)
         enif_mutex_destroy(conn->mutex);
         conn->mutex = NULL;
     }
+
+    if (conn->interrupt_mutex) {
+        enif_mutex_destroy(conn->interrupt_mutex);
+        conn->interrupt_mutex = NULL;
+    }
 }
 
 void
@@ -1129,6 +1164,7 @@ on_load(ErlNifEnv* env, void** priv, ERL_NIF_TERM info)
     am_invalid_flags                       = enif_make_atom(env, "invalid_flags");
     am_database_open_failed                = enif_make_atom(env, "database_open_failed");
     am_failed_to_create_mutex              = enif_make_atom(env, "failed_to_create_mutex");
+    am_failed_to_create_interrupt_mutex    = enif_make_atom(env, "failed_to_create_interrupt_mutex");
     am_invalid_connection                  = enif_make_atom(env, "invalid_connection");
     am_sql_not_iolist                      = enif_make_atom(env, "sql_not_iolist");
     am_connection_closed                   = enif_make_atom(env, "connection_closed");
@@ -1352,7 +1388,6 @@ exqlite_interrupt(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
     assert(env);
 
     connection_t* conn = NULL;
-    sqlite3* db = NULL;
 
     if (argc != 1) {
         return enif_make_badarg(env);
@@ -1362,18 +1397,14 @@ exqlite_interrupt(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
         return make_error_tuple(env, am_invalid_connection);
     }
 
-    // First check
+    // DB is already closed, nothing to do here
     if (conn->db == NULL) {
         return am_ok;
     }
 
-    // Get a local copy of the db pointer to avoid race conditions
-    db = conn->db;
-    if (db == NULL) {
-        return am_ok;
-    }
-
-    sqlite3_interrupt(db);
+    connection_acquire_interrupt_lock(conn);
+    sqlite3_interrupt(conn->db);
+    connection_release_interrupt_lock(conn);
 
     return am_ok;
 }
